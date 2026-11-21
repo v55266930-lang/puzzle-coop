@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="theme-color" content="#1e1e2e" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <title>Пазлы Вместе — Кооператив</title>
+  <!-- Подключаем PeerJS для сетевой игры без своего бэкенда -->
+  <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+  <style>
+    * { box-sizing: border-box; touch-action: none; user-select: none; -webkit-user-select: none; }
+    body {
+      margin: 0; padding: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #181825; color: #cdd6f4;
+      display: flex; flex-direction: column; height: 100vh; overflow: hidden;
+    }
+    header {
+      background: #1e1e2e; padding: 10px 14px;
+      display: flex; justify-content: space-between; align-items: center;
+      border-bottom: 1px solid #313244; z-index: 10;
+    }
+    header h1 { font-size: 16px; margin: 0; color: #cba6f7; }
+    .status { font-size: 12px; padding: 4px 8px; border-radius: 12px; background: #313244; }
+    .status.online { background: #a6e3a1; color: #11111b; font-weight: bold; }
+
+    #menu {
+      padding: 16px; display: flex; flex-direction: column; gap: 12px;
+      background: #1e1e2e; border-bottom: 1px solid #313244; z-index: 10;
+    }
+    .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    button, .file-btn {
+      background: #89b4fa; color: #11111b; border: none; border-radius: 10px;
+      padding: 10px 14px; font-size: 14px; font-weight: 600; cursor: pointer;
+      text-align: center; flex: 1;
+    }
+    button:active { transform: scale(0.97); }
+    button.secondary { background: #45475a; color: #cdd6f4; }
+    button.success { background: #a6e3a1; color: #11111b; }
+    input[type="text"], select {
+      background: #313244; color: #cdd6f4; border: 1px solid #45475a;
+      border-radius: 10px; padding: 10px; font-size: 14px; flex: 1; min-width: 110px;
+    }
+    input[type="file"] { display: none; }
+
+    #room-info {
+      background: #313244; padding: 8px 12px; border-radius: 8px;
+      font-size: 13px; display: flex; justify-content: space-between; align-items: center;
+    }
+    #my-id { font-weight: bold; color: #f9e2af; letter-spacing: 1px; }
+
+    #game-area {
+      flex: 1; position: relative; overflow: hidden;
+      background: radial-gradient(circle, #242436 1px, transparent 1px);
+      background-size: 20px 20px;
+    }
+    canvas { display: block; width: 100%; height: 100%; }
+
+    #win-banner {
+      position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+      background: rgba(30, 30, 46, 0.95); border: 2px solid #a6e3a1;
+      padding: 24px; border-radius: 16px; text-align: center; display: none; z-index: 20;
+    }
+    #win-banner h2 { margin: 0 0 10px; color: #a6e3a1; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>🧩 Пазлы Вместе</h1>
+  <div id="net-status" class="status">Офлайн</div>
+</header>
+
+<div id="menu">
+  <div id="room-info">
+    <span>Твой код комнаты: <span id="my-id">...</span></span>
+    <button class="secondary" style="flex:0; padding: 6px 10px; font-size:12px;" onclick="copyId()">Копировать</button>
+  </div>
+
+  <div class="row">
+    <input type="text" id="friend-id" placeholder="Код друга" />
+    <button class="success" onclick="connectToFriend()">Подключиться</button>
+  </div>
+
+  <div class="row">
+    <label class="file-btn">
+      📷 Выбрать фото
+      <input type="file" id="photo-input" accept="image/*" />
+    </label>
+    <select id="grid-size">
+      <option value="3">3 × 3 (Легко)</option>
+      <option value="4" selected>4 × 4 (Средне)</option>
+      <option value="5">5 × 5 (Сложно)</option>
+      <option value="6">6 × 6 (Профи)</option>
+    </select>
+    <button onclick="startNewGame()">Начать</button>
+  </div>
+</div>
+
+<div id="game-area">
+  <canvas id="canvas"></canvas>
+  <div id="win-banner">
+    <h2>🎉 Пазл собран!</h2>
+    <p>Отличная командная работа!</p>
+    <button class="success" onclick="document.getElementById('win-banner').style.display='none'">Круто!</button>
+  </div>
+</div>
+
+<script>
+  const canvas = document.getElementById('canvas');
+  const ctx = canvas.getContext('2d');
+  const netStatus = document.getElementById('net-status');
+  const myIdSpan = document.getElementById('my-id');
+
+  let width, height;
+  let img = new Image();
+  let grid = 4;
+  let pieces = [];
+  let board = { x: 0, y: 0, w: 0, h: 0 };
+  let draggingPiece = null;
+  let dragOffset = { x: 0, y: 0 };
+  let friendCursor = null;
+
+  // Генерируем короткий удобный ID комнаты из 5 символов
+  const shortId = Math.random().toString(36).substring(2, 7).toUpperCase();
+  const peer = new Peer('PZ-' + shortId);
+  let conn = null;
+
+  peer.on('open', (id) => {
+    myIdSpan.textContent = shortId;
+  });
+
+  // Когда друг подключается к нам
+  peer.on('connection', (connection) => {
+    setupConnection(connection);
+  });
+
+  function connectToFriend() {
+    const code = document.getElementById('friend-id').value.trim().toUpperCase();
+    if (!code) return alert('Введи код друга!');
+    const connection = peer.connect('PZ-' + code);
+    setupConnection(connection);
+  }
+
+  function setupConnection(connection) {
+    conn = connection;
+    conn.on('open', () => {
+      netStatus.textContent = 'Друг в сети';
+      netStatus.classList.add('online');
+      // Если у нас уже идёт игра — отправляем её другу
+      if (pieces.length > 0 && img.src) {
+        sendFullState();
+      }
+    });
+
+    conn.on('data', (data) => {
+      if (data.type === 'INIT') {
+        grid = data.grid;
+        document.getElementById('grid-size').value = grid;
+        img = new Image();
+        img.onload = () => {
+          pieces = data.pieces;
+          calcBoard();
+          draw();
+        };
+        img.src = data.image;
+      } else if (data.type === 'MOVE') {
+        const p = pieces.find(item => item.id === data.id);
+        if (p && !p.locked) {
+          p.rx = data.rx;
+          p.ry = data.ry;
+          friendCursor = { rx: data.rx, ry: data.ry };
+          draw();
+        }
+      } else if (data.type === 'LOCK') {
+        const p = pieces.find(item => item.id === data.id);
+        if (p) {
+          p.rx = p.tx;
+          p.ry = p.ty;
+          p.locked = true;
+          friendCursor = null;
+          checkWin();
+          draw();
+        }
+      }
+    });
+
+    conn.on('close', () => {
+      netStatus.textContent = 'Отключен';
+      netStatus.classList.remove('online');
+      conn = null;
+    });
+  }
+
+  function copyId() {
+    navigator.clipboard.writeText(shortId);
+    alert('Код комнаты скопирован: ' + shortId);
+  }
+
+  // Загрузка фото с телефона
+  document.getElementById('photo-input').addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      // Сжимаем изображение для быстрой передачи по сети другу
+      const tempImg = new Image();
+      tempImg.onload = () => {
+        const offCanvas = document.createElement('canvas');
+        const maxSize = 800;
+        let w = tempImg.width, h = tempImg.height;
+        if (w > h && w > maxSize) { h *= maxSize / w; w = maxSize; }
+        else if (h > maxSize) { w *= maxSize / h; h = maxSize; }
+        offCanvas.width = w; offCanvas.height = h;
+        offCanvas.getContext('2d').drawImage(tempImg, 0, 0, w, h);
+        img.src = offCanvas.toDataURL('image/jpeg', 0.75);
+      };
+      tempImg.src = event.target.result;
+    };
+    reader.readAsDataURL(file);
+  });
+
+  // Дефолтная картинка-заглушка (градиент + узор), если фото ещё не выбрано
+  function createDefaultImage() {
+    const c = document.createElement('canvas');
+    c.width = 600; c.height = 600;
+    const g = c.getContext('2d');
+    const grad = g.createLinearGradient(0, 0, 600, 600);
+    grad.addColorStop(0, '#f38ba8');
+    grad.addColorStop(0.5, '#cba6f7');
+    grad.addColorStop(1, '#89b4fa');
+    g.fillStyle = grad;
+    g.fillRect(0, 0, 600, 600);
+    g.fillStyle = 'rgba(255,255,255,0.25)';
+    g.beginPath(); g.arc(300, 300, 180, 0, Math.PI * 2); g.fill();
+    g.fillStyle = '#11111b'; g.font = 'bold 42px sans-serif'; g.textAlign = 'center';
+    g.fillText('ЗАГРУЗИ СВОЁ ФОТО', 300, 315);
+    img.src = c.toDataURL();
+  }
+  createDefaultImage();
+
+  function resize() {
+    const area = document.getElementById('game-area');
+    width = canvas.width = area.clientWidth;
+    height = canvas.height = area.clientHeight;
+    calcBoard();
+    draw();
+  }
+  window.addEventListener('resize', resize);
+
+  function calcBoard() {
+    if (!img.width) return;
+    const maxW = width * 0.85;
+    const maxH = height * 0.55;
+    const ratio = Math.min(maxW / img.width, maxH / img.height);
+    board.w = img.width * ratio;
+    board.h = img.height * ratio;
+    board.x = (width - board.w) / 2;
+    board.y = 20;
+  }
+
+  function startNewGame() {
+    document.getElementById('win-banner').style.display = 'none';
+    grid = parseInt(document.getElementById('grid-size').value);
+    calcBoard();
+    pieces = [];
+    let id = 0;
+
+    // Координаты храним в относительных единицах (0..1), чтобы экраны разных телефонов совпадали
+    for (let r = 0; r < grid; r++) {
+      for (let c = 0; c < grid; c++) {
+        const tx = c / grid;
+        const ty = r / grid;
+        // Разбрасываем кусочки в нижней части экрана
+        const rx = 0.05 + Math.random() * (0.85 - 1 / grid);
+        const ry = 1.05 + Math.random() * 0.45;
+        pieces.push({
+          id: id++, r, c,
+          tx, ty, rx, ry,
+          locked: false
+        });
+      }
+    }
+    sendFullState();
+    draw();
+  }
+
+  function sendFullState() {
+    if (conn && conn.open) {
+      conn.send({
+        type: 'INIT',
+        grid: grid,
+        image: img.src,
+        pieces: pieces
+      });
+    }
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, width, height);
+    if (!board.w) return;
+
+    // Подложка (рамка куда собирать пазл)
+    ctx.fillStyle = 'rgba(49, 50, 68, 0.5)';
+    ctx.fillRect(board.x, board.y, board.w, board.h);
+    ctx.strokeStyle = '#585b70';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(board.x, board.y, board.w, board.h);
+
+    // Полупрозрачная подсказка картинки на фоне
+    ctx.save();
+    ctx.globalAlpha = 0.15;
+    ctx.drawImage(img, board.x, board.y, board.w, board.h);
+    ctx.restore();
+
+    const pw = board.w / grid;
+    const ph = board.h / grid;
+    const sw = img.width / grid;
+    const sh = img.height / grid;
+
+    // Сначала рисуем закреплённые куски, потом свободные
+    const sorted = [...pieces].sort((a, b) => (a === draggingPiece ? 1 : b === draggingPiece ? -1 : a.locked ? -1 : 1));
+
+    for (const p of sorted) {
+      const px = board.x + p.rx * board.w;
+      const py = board.y + p.ry * board.h;
+
+      ctx.drawImage(
+        img,
+        p.c * sw, p.r * sh, sw, sh,
+        px, py, pw, ph
+      );
+
+      if (!p.locked) {
+        ctx.strokeStyle = (p === draggingPiece) ? '#f9e2af' : 'rgba(255,255,255,0.4)';
+        ctx.lineWidth = (p === draggingPiece) ? 3 : 1;
+        ctx.strokeRect(px, py, pw, ph);
+      }
+    }
+
+    // Отображаем индикатор действия друга
+    if (friendCursor) {
+      const fx = board.x + friendCursor.rx * board.w + pw / 2;
+      const fy = board.y + friendCursor.ry * board.h + ph / 2;
+      ctx.fillStyle = '#a6e3a1';
+      ctx.beginPath(); ctx.arc(fx, fy, 10, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#11111b'; ctx.font = 'bold 11px sans-serif';
+      ctx.fillText('Друг', fx, fy - 14);
+    }
+  }
+
+  // Управление касаниями (Touch / Mouse)
+  function getPos(e) {
+    const rect = canvas.getBoundingClientRect();
+    const touch = e.touches ? e.touches[0] : e;
+    return { x: touch.clientX - rect.left, y: touch.clientY - rect.top };
+  }
+
+  function onDown(e) {
+    const pos = getPos(e);
+    const pw = board.w / grid;
+    const ph = board.h / grid;
+
+    for (let i = pieces.length - 1; i >= 0; i--) {
+      const p = pieces[i];
+      if (p.locked) continue;
+      const px = board.x + p.rx * board.w;
+      const py = board.y + p.ry * board.h;
+      if (pos.x >= px && pos.x <= px + pw && pos.y >= py && pos.y <= py + ph) {
+        draggingPiece = p;
+        dragOffset.x = pos.x - px;
+        dragOffset.y = pos.y - py;
+        // Поднимаем кусочек наверх
+        pieces.splice(i, 1);
+        pieces.push(p);
+        draw();
+        break;
+      }
+    }
+  }
+
+  function onMove(e) {
+    if (!draggingPiece) return;
+    e.preventDefault();
+    const pos = getPos(e);
+    const newX = pos.x - dragOffset.x;
+    const newY = pos.y - dragOffset.y;
+
+    draggingPiece.rx = (newX - board.x) / board.w;
+    draggingPiece.ry = (newY - board.y) / board.h;
+
+    if (conn && conn.open) {
+      conn.send({
+        type: 'MOVE',
+        id: draggingPiece.id,
+        rx: draggingPiece.rx,
+        ry: draggingPiece.ry
+      });
+    }
+    draw();
+  }
+
+  function onUp() {
+    if (!draggingPiece) return;
+    const dist = Math.hypot(draggingPiece.rx - draggingPiece.tx, draggingPiece.ry - draggingPiece.ty);
+    // Примагничивание, если кусочек рядом со своим местом
+    if (dist < 0.06) {
+      draggingPiece.rx = draggingPiece.tx;
+      draggingPiece.ry = draggingPiece.ty;
+      draggingPiece.locked = true;
+      if (conn && conn.open) {
+        conn.send({ type: 'LOCK', id: draggingPiece.id });
+      }
+      checkWin();
+    }
+    draggingPiece = null;
+    draw();
+  }
+
+  function checkWin() {
+    if (pieces.length > 0 && pieces.every(p => p.locked)) {
+      document.getElementById('win-banner').style.display = 'block';
+    }
+  }
+
+  canvas.addEventListener('mousedown', onDown);
+  canvas.addEventListener('mousemove', onMove);
+  window.addEventListener('mouseup', onUp);
+
+  canvas.addEventListener('touchstart', onDown, { passive: false });
+  canvas.addEventListener('touchmove', onMove, { passive: false });
+  window.addEventListener('touchend', onUp);
+
+  resize();
+</script>
+</body>
+</html>
